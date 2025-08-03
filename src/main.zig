@@ -1,10 +1,13 @@
 const std = @import("std");
 const allocator = std.heap.page_allocator;
+const Writer = std.Io.Writer;
 
-var stdout: @typeInfo(@TypeOf(std.fs.File.writer)).@"fn".return_type.? = undefined;
+var stdout: *Writer = undefined;
 
 pub fn main() !void {
-    stdout = std.io.getStdOut().writer();
+    // Use empty buffer to always flush immediately
+    var stdout_file = std.fs.File.stdout().writer(&.{});
+    stdout = &stdout_file.interface;
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -19,25 +22,22 @@ pub fn main() !void {
     if (std.mem.eql(u8, command, "decode")) {
         const encodedStr = args[2];
         const decodedStr = decodeBencode(encodedStr) catch {
-            try stdout.print("Invalid encoded value\n", .{});
+            stdout.print("Invalid encoded value\n", .{}) catch {};
             std.process.exit(1);
         };
-        var string = std.ArrayList(u8).init(allocator);
-        try std.json.stringify(decodedStr.*, .{}, string.writer());
-        const jsonStr = try string.toOwnedSlice();
-        try stdout.print("{s}\n", .{jsonStr});
+        try stdout.print("{f}\n", .{std.json.fmt(decodedStr, .{})});
     }
 }
 
-fn decodeBencode(encodedValue: []const u8) !*const []const u8 {
+fn decodeBencode(encodedValue: []const u8) error{InvalidArgument}![]const u8 {
     if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
         const firstColon = std.mem.indexOf(u8, encodedValue, ":");
         if (firstColon == null) {
             return error.InvalidArgument;
         }
-        return &encodedValue[firstColon.? + 1 ..];
+        return encodedValue[firstColon.? + 1 ..];
     } else {
-        try stdout.print("Only strings are supported at the moment\n", .{});
+        stdout.print("Only strings are supported at the moment\n", .{}) catch {};
         std.process.exit(1);
     }
 }
