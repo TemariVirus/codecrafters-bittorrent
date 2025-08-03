@@ -24,7 +24,20 @@ pub fn main() !void {
         const decoded = Bencode.decodeSlice(allocator, encoded) catch @panic("Invalid encoded value");
         defer decoded.deinit();
         try stdout.print("{f}\n", .{std.json.fmt(decoded.value, .{})});
-    }
+    } else if (std.mem.eql(u8, command, "info")) {
+        const metainfo_file = args[2];
+        var file_buf: [4096]u8 = undefined;
+        const f = try std.fs.cwd().openFile(metainfo_file, .{});
+        defer f.close();
+        var reader = f.reader(&file_buf);
+
+        const decoded = Bencode.decode(allocator, &reader.interface, .{}) catch @panic("Invalid encoded value");
+        defer decoded.deinit();
+
+        const metainfo = decoded.value.dict;
+        try stdout.print("Tracker URL: {s}\n", .{metainfo.get("announce").?.str});
+        try stdout.print("Length: {d}\n", .{metainfo.get("info").?.dict.get("length").?.int});
+    } else @panic("Unknown command");
 }
 
 const Bencode = union(enum) {

@@ -3,6 +3,7 @@ const std = @import("std");
 const is_0_15 = @import("builtin").zig_version.major == 0 and @import("builtin").zig_version.minor == 15;
 
 pub fn build(b: *std.Build) void {
+    // Hack because codecrafters doesn't support using Zig master
     if (!is_0_15) {
         const zig_dep, const zig_exe = switch (@import("builtin").os.tag) {
             .linux => .{ "zig_linux", "zig" },
