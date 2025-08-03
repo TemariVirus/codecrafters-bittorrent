@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -22,11 +23,7 @@ pub fn main() !void {
         const encoded = args[2];
         const decoded = Bencode.decodeSlice(allocator, encoded) catch @panic("Invalid encoded value");
         defer decoded.deinit();
-        switch (decoded.value) {
-            .string => |s| try stdout.print("{f}\n", .{std.json.fmt(s, .{})}),
-            .integer => |i| try stdout.print("{f}\n", .{std.json.fmt(i, .{})}),
-            .list => |l| try stdout.print("{f}\n", .{std.json.fmt(l, .{})}),
-        }
+        try stdout.print("{f}\n", .{std.json.fmt(decoded.value, .{})});
     }
 }
 
@@ -48,9 +45,9 @@ const Bencode = union(enum) {
         allocate_strings: bool = true,
     };
 
-    pub const DecodeError = std.mem.Allocator.Error || Reader.Error || error{InvalidArgument};
+    pub const DecodeError = Allocator.Error || Reader.Error || error{InvalidArgument};
 
-    pub fn decode(allocator: std.mem.Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Decoded {
+    pub fn decode(allocator: Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Decoded {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
         return .{
@@ -59,7 +56,7 @@ const Bencode = union(enum) {
         };
     }
 
-    fn decodeInner(allocator: std.mem.Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Bencode {
+    fn decodeInner(allocator: Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Bencode {
         return switch (try encoded.peekByte()) {
             '0'...'9' => try decodeString(if (options.allocate_strings) allocator else null, encoded),
             'i' => try decodeInteger(encoded),
@@ -68,12 +65,12 @@ const Bencode = union(enum) {
         };
     }
 
-    pub fn decodeSlice(allocator: std.mem.Allocator, encoded: []const u8) DecodeError!Decoded {
+    pub fn decodeSlice(allocator: Allocator, encoded: []const u8) DecodeError!Decoded {
         var reader: Reader = .fixed(encoded);
         return decode(allocator, &reader, .{ .allocate_strings = false });
     }
 
-    fn decodeString(allocator: ?std.mem.Allocator, encoded: *Reader) DecodeError!Bencode {
+    fn decodeString(allocator: ?Allocator, encoded: *Reader) DecodeError!Bencode {
         const len = blk: {
             // On 128-bit systems (do those exist?) the largest usize has 39 digits
             var buf: [39]u8 = undefined;
@@ -118,10 +115,31 @@ const Bencode = union(enum) {
         return .{ .integer = value };
     }
 
-    fn decodeList(allocator: std.mem.Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Bencode {
-        _ = allocator;
-        _ = encoded;
-        _ = options;
-        @panic("TODO");
+    fn decodeList(allocator: Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Bencode {
+        assert(try encoded.takeByte() == 'l');
+
+        // No need to perform cleanup as `allocator` is an arena
+        var list: std.ArrayList(Bencode) = .init(allocator);
+        while (true) {
+            if (try encoded.peekByte() == 'e') {
+                _ = encoded.takeByte() catch unreachable; // Discard the 'e'
+                return .{ .list = try list.toOwnedSlice() };
+            }
+            try list.append(try decodeInner(allocator, encoded, options));
+        }
+    }
+
+    pub fn jsonStringify(self: Bencode, json: *std.json.Stringify) std.json.Stringify.Error!void {
+        return switch (self) {
+            .string => |s| json.write(s),
+            .integer => |i| json.write(i),
+            .list => {
+                try json.beginArray();
+                for (self.list) |item| {
+                    try item.jsonStringify(json);
+                }
+                try json.endArray();
+            },
+        };
     }
 };
