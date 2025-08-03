@@ -28,9 +28,10 @@ pub fn main() !void {
 }
 
 const Bencode = union(enum) {
-    string: []const u8,
-    integer: i64,
+    str: []const u8,
+    int: i64,
     list: []const Bencode,
+    dict: std.StringHashMapUnmanaged(Bencode),
 
     pub const Decoded = struct {
         arena: std.heap.ArenaAllocator,
@@ -58,9 +59,10 @@ const Bencode = union(enum) {
 
     fn decodeInner(allocator: Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Bencode {
         return switch (try encoded.peekByte()) {
-            '0'...'9' => try decodeString(if (options.allocate_strings) allocator else null, encoded),
-            'i' => try decodeInteger(encoded),
-            'l' => try decodeList(allocator, encoded, options),
+            '0'...'9' => .{ .str = try decodeStr(if (options.allocate_strings) allocator else null, encoded) },
+            'i' => .{ .int = try decodeInt(encoded) },
+            'l' => .{ .list = try decodeList(allocator, encoded, options) },
+            'd' => .{ .dict = try decodeDict(allocator, encoded, options) },
             else => error.InvalidArgument,
         };
     }
@@ -70,7 +72,7 @@ const Bencode = union(enum) {
         return decode(allocator, &reader, .{ .allocate_strings = false });
     }
 
-    fn decodeString(allocator: ?Allocator, encoded: *Reader) DecodeError!Bencode {
+    fn decodeStr(allocator: ?Allocator, encoded: *Reader) DecodeError![]const u8 {
         const len = blk: {
             // On 128-bit systems (do those exist?) the largest usize has 39 digits
             var buf: [39]u8 = undefined;
@@ -87,15 +89,13 @@ const Bencode = union(enum) {
             break :blk std.fmt.parseInt(usize, writer.buffered(), 10) catch return error.InvalidArgument;
         };
 
-        return .{
-            .string = if (allocator) |alloc|
-                try encoded.readAlloc(alloc, len)
-            else
-                try encoded.take(len),
-        };
+        return if (allocator) |alloc|
+            try encoded.readAlloc(alloc, len)
+        else
+            try encoded.take(len);
     }
 
-    fn decodeInteger(encoded: *Reader) DecodeError!Bencode {
+    fn decodeInt(encoded: *Reader) DecodeError!i64 {
         assert(try encoded.takeByte() == 'i');
 
         // Largest i64 has 20 digits
@@ -111,11 +111,14 @@ const Bencode = union(enum) {
         };
         _ = encoded.takeByte() catch unreachable; // Discard the 'e'
 
-        const value = std.fmt.parseInt(i64, writer.buffered(), 10) catch return error.InvalidArgument;
-        return .{ .integer = value };
+        return std.fmt.parseInt(i64, writer.buffered(), 10) catch return error.InvalidArgument;
     }
 
-    fn decodeList(allocator: Allocator, encoded: *Reader, options: DecodeOptions) DecodeError!Bencode {
+    fn decodeList(
+        allocator: Allocator,
+        encoded: *Reader,
+        options: DecodeOptions,
+    ) DecodeError![]const Bencode {
         assert(try encoded.takeByte() == 'l');
 
         // No need to perform cleanup as `allocator` is an arena
@@ -123,23 +126,52 @@ const Bencode = union(enum) {
         while (true) {
             if (try encoded.peekByte() == 'e') {
                 _ = encoded.takeByte() catch unreachable; // Discard the 'e'
-                return .{ .list = try list.toOwnedSlice() };
+                return try list.toOwnedSlice();
             }
             try list.append(try decodeInner(allocator, encoded, options));
         }
     }
 
+    fn decodeDict(
+        allocator: Allocator,
+        encoded: *Reader,
+        options: DecodeOptions,
+    ) DecodeError!std.StringHashMapUnmanaged(Bencode) {
+        assert(try encoded.takeByte() == 'd');
+
+        // No need to perform cleanup as `allocator` is an arena
+        var dict: std.StringHashMap(Bencode) = .init(allocator);
+        while (true) {
+            if (try encoded.peekByte() == 'e') {
+                _ = encoded.takeByte() catch unreachable; // Discard the 'e'
+                return dict.unmanaged;
+            }
+            const key = try decodeStr(if (options.allocate_strings) allocator else null, encoded);
+            const value = try decodeInner(allocator, encoded, options);
+            try dict.put(key, value);
+        }
+    }
+
     pub fn jsonStringify(self: Bencode, json: *std.json.Stringify) std.json.Stringify.Error!void {
-        return switch (self) {
-            .string => |s| json.write(s),
-            .integer => |i| json.write(i),
-            .list => {
+        switch (self) {
+            .str => |s| try json.write(s),
+            .int => |i| try json.write(i),
+            .list => |l| {
                 try json.beginArray();
-                for (self.list) |item| {
-                    try item.jsonStringify(json);
+                for (l) |item| {
+                    try json.write(item);
                 }
                 try json.endArray();
             },
-        };
+            .dict => |d| {
+                try json.beginObject();
+                var it = d.iterator();
+                while (it.next()) |entry| {
+                    try json.objectField(entry.key_ptr.*);
+                    try json.write(entry.value_ptr.*);
+                }
+                try json.endObject();
+            },
+        }
     }
 };
