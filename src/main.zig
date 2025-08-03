@@ -1,8 +1,11 @@
 const std = @import("std");
-const stdout = std.io.getStdOut().writer();
 const allocator = std.heap.page_allocator;
 
+var stdout: @typeInfo(@TypeOf(std.fs.File.writer)).@"fn".return_type.? = undefined;
+
 pub fn main() !void {
+    stdout = std.io.getStdOut().writer();
+
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -14,19 +17,15 @@ pub fn main() !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "decode")) {
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
-        std.debug.print("Logs from your program will appear here\n", .{});
-
-        // Uncomment this block to pass the first stage
-        // const encodedStr = args[2];
-        // const decodedStr = decodeBencode(encodedStr) catch {
-        //     try stdout.print("Invalid encoded value\n", .{});
-        //     std.process.exit(1);
-        // };
-        // var string = std.ArrayList(u8).init(allocator);
-        // try std.json.stringify(decodedStr.*, .{}, string.writer());
-        // const jsonStr = try string.toOwnedSlice();
-        // try stdout.print("{s}\n", .{jsonStr});
+        const encodedStr = args[2];
+        const decodedStr = decodeBencode(encodedStr) catch {
+            try stdout.print("Invalid encoded value\n", .{});
+            std.process.exit(1);
+        };
+        var string = std.ArrayList(u8).init(allocator);
+        try std.json.stringify(decodedStr.*, .{}, string.writer());
+        const jsonStr = try string.toOwnedSlice();
+        try stdout.print("{s}\n", .{jsonStr});
     }
 }
 
