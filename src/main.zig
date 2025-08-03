@@ -48,15 +48,33 @@ pub fn main() !void {
         defer decoded.deinit();
 
         const metainfo = decoded.value.dict;
+        const info = metainfo.get("info").?.dict;
         try stdout.print("Tracker URL: {s}\n", .{metainfo.get("announce").?.str});
-        try stdout.print("Length: {d}\n", .{metainfo.get("info").?.dict.get("length").?.int});
+        try stdout.print("Length: {d}\n", .{info.get("length").?.int});
 
+        const Hash = std.crypto.hash.Sha1;
         const hash = blk: {
-            var writer = null_writer.hashed(std.crypto.hash.Sha1.init(.{}), &.{});
-            try writer.writer.print("{f}", .{metainfo.get("info").?});
+            var writer = null_writer.hashed(Hash.init(.{}), &.{});
+            try writer.writer.print("{f}", .{Bencode{ .dict = info }});
             break :blk writer.hasher.finalResult();
         };
         try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(hash, .lower)});
+
+        const piece_len = info.get("piece length").?.int;
+        try stdout.print("Piece Length: {d}\n", .{piece_len});
+
+        try stdout.print("Piece Hashes:\n", .{});
+        var piece_hashes = std.mem.window(
+            u8,
+            info.get("pieces").?.str,
+            Hash.digest_length,
+            Hash.digest_length,
+        );
+        while (piece_hashes.next()) |piece_hash| {
+            try stdout.print("{s}\n", .{
+                std.fmt.bytesToHex(piece_hash[0..Hash.digest_length].*, .lower),
+            });
+        }
     } else @panic("Unknown command");
 }
 
