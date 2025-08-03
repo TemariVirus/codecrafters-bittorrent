@@ -4,12 +4,25 @@ const assert = std.debug.assert;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 
-var stdout: *Writer = undefined;
+var null_writer: Writer = .{
+    .buffer = &.{},
+    .vtable = &.{
+        .drain = (struct {
+            fn drain(_: *Writer, data: []const []const u8, splat: usize) Writer.Error!usize {
+                var written: usize = data[data.len - 1].len * splat;
+                for (data[0 .. data.len - 1]) |bytes| {
+                    written += bytes.len;
+                }
+                return written;
+            }
+        }).drain,
+    },
+};
 
 pub fn main() !void {
     // Use empty buffer to always flush immediately
     var stdout_file = std.fs.File.stdout().writer(&.{});
-    stdout = &stdout_file.interface;
+    const stdout = &stdout_file.interface;
     const allocator = std.heap.smp_allocator;
 
     const args = try std.process.argsAlloc(allocator);
@@ -37,6 +50,13 @@ pub fn main() !void {
         const metainfo = decoded.value.dict;
         try stdout.print("Tracker URL: {s}\n", .{metainfo.get("announce").?.str});
         try stdout.print("Length: {d}\n", .{metainfo.get("info").?.dict.get("length").?.int});
+
+        const hash = blk: {
+            var writer = null_writer.hashed(std.crypto.hash.Sha1.init(.{}), &.{});
+            try writer.writer.print("{f}", .{metainfo.get("info").?});
+            break :blk writer.hasher.finalResult();
+        };
+        try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(hash, .lower)});
     } else @panic("Unknown command");
 }
 
@@ -44,7 +64,40 @@ const Bencode = union(enum) {
     str: []const u8,
     int: i64,
     list: []const Bencode,
-    dict: std.StringHashMapUnmanaged(Bencode),
+    dict: Dict,
+
+    pub const Dict = struct {
+        /// Stored in ascending order by `key`
+        entires: []const Entry,
+
+        pub const Entry = struct {
+            key: []const u8,
+            value: Bencode,
+        };
+
+        pub fn fromSlice(entries: []Entry) Dict {
+            std.sort.pdq(Entry, entries, {}, (struct {
+                fn lt(_: void, lhs: Entry, rhs: Entry) bool {
+                    return std.mem.order(u8, lhs.key, rhs.key) == .lt;
+                }
+            }).lt);
+            return .{ .entires = entries };
+        }
+
+        pub fn get(self: Dict, key: []const u8) ?Bencode {
+            var left: usize = 0;
+            var right: usize = self.entires.len - 1;
+            while (left <= right) {
+                const mid = left + (right - left) / 2;
+                switch (std.mem.order(u8, self.entires[mid].key, key)) {
+                    .lt => left = mid + 1,
+                    .eq => return self.entires[mid].value,
+                    .gt => right = mid - 1,
+                }
+            }
+            return null;
+        }
+    };
 
     pub const Decoded = struct {
         arena: std.heap.ArenaAllocator,
@@ -149,20 +202,46 @@ const Bencode = union(enum) {
         allocator: Allocator,
         encoded: *Reader,
         options: DecodeOptions,
-    ) DecodeError!std.StringHashMapUnmanaged(Bencode) {
+    ) DecodeError!Dict {
         assert(try encoded.takeByte() == 'd');
 
         // No need to perform cleanup as `allocator` is an arena
-        var dict: std.StringHashMap(Bencode) = .init(allocator);
+        var entries: std.ArrayList(Dict.Entry) = .init(allocator);
         while (true) {
             if (try encoded.peekByte() == 'e') {
                 _ = encoded.takeByte() catch unreachable; // Discard the 'e'
-                return dict.unmanaged;
+                return .fromSlice(try entries.toOwnedSlice());
             }
             const key = try decodeStr(if (options.allocate_strings) allocator else null, encoded);
             const value = try decodeInner(allocator, encoded, options);
-            try dict.put(key, value);
+            try entries.append(.{ .key = key, .value = value });
         }
+    }
+
+    pub fn encode(self: Bencode, writer: *Writer) Writer.Error!void {
+        switch (self) {
+            .str => |s| try writer.print("{d}:{s}", .{ s.len, s }),
+            .int => |i| try writer.print("i{d}e", .{i}),
+            .list => |l| {
+                try writer.writeByte('l');
+                for (l) |item| {
+                    try item.encode(writer);
+                }
+                try writer.writeByte('e');
+            },
+            .dict => |d| {
+                try writer.writeByte('d');
+                for (d.entires) |entry| {
+                    try writer.print("{d}:{s}", .{ entry.key.len, entry.key });
+                    try entry.value.encode(writer);
+                }
+                try writer.writeByte('e');
+            },
+        }
+    }
+
+    pub fn format(self: Bencode, writer: *Writer) Writer.Error!void {
+        return self.encode(writer);
     }
 
     pub fn jsonStringify(self: Bencode, json: *std.json.Stringify) std.json.Stringify.Error!void {
@@ -178,10 +257,9 @@ const Bencode = union(enum) {
             },
             .dict => |d| {
                 try json.beginObject();
-                var it = d.iterator();
-                while (it.next()) |entry| {
-                    try json.objectField(entry.key_ptr.*);
-                    try json.write(entry.value_ptr.*);
+                for (d.entires) |entry| {
+                    try json.objectField(entry.key);
+                    try json.write(entry.value);
                 }
                 try json.endObject();
             },
