@@ -24,10 +24,18 @@ pub fn build(b: *std.Build) void {
             .optimize = b.standardOptimizeOption(.{}),
         }),
     });
+    if (@import("builtin").os.tag == .windows) {
+        // Needed for std.http.Client
+        exe.root_module.linkSystemLibrary("advapi32", .{});
+        exe.root_module.linkSystemLibrary("crypt32", .{});
+        exe.root_module.linkSystemLibrary("ws2_32", .{});
+    }
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     const run_step = b.step("run", "Run the app");
+    run_step.dependOn(b.getInstallStep());
     run_step.dependOn(&run_cmd.step);
     if (b.args) |args| {
         run_cmd.addArgs(args);

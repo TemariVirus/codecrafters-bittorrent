@@ -50,6 +50,48 @@ pub fn main() !void {
         for (metainfo.piece_hashes) |piece_hash| {
             try stdout.print("{s}\n", .{std.fmt.bytesToHex(piece_hash, .lower)});
         }
+    } else if (std.mem.eql(u8, command, "peers")) {
+        const metainfo = try readTorrent(allocator, args[2]);
+        defer metainfo.deinit(allocator);
+
+        const response = blk: {
+            var client: std.http.Client = .{ .allocator = allocator };
+            defer client.deinit();
+
+            const peer_id = "hjgv3678TV3vfHGQpoch"; // Keyboard mash
+            const query = try std.fmt.allocPrint(
+                allocator,
+                "info_hash={s}&peer_id={s}&port={d}&uploaded={d}&downloaded={d}&left={d}&compact=1",
+                .{ metainfo.hash, peer_id, 6881, 0, 0, metainfo.length },
+            );
+            defer allocator.free(query);
+
+            var tracker: std.Uri = try .parse(metainfo.announce);
+            tracker.query = .{ .raw = query };
+
+            var server_header_buffer: [16 * 1024]u8 = undefined;
+            var req = try client.open(.GET, tracker, .{ .server_header_buffer = &server_header_buffer });
+            defer req.deinit();
+            try req.send();
+            try req.finish();
+            try req.wait();
+
+            // We don't care about the headers, so we can reuse the buffer
+            var reader = req.reader().adaptToNewApi(&server_header_buffer);
+            break :blk try Bencode.decode(allocator, &reader.new_interface, .{});
+        };
+        defer response.deinit();
+
+        var peers = std.mem.window(u8, response.value.dict.get("peers").?.str, 6, 6);
+        while (peers.next()) |peer_bytes| {
+            try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
+                peer_bytes[0],
+                peer_bytes[1],
+                peer_bytes[2],
+                peer_bytes[3],
+                std.mem.readInt(u16, peer_bytes[4..6], .big),
+            });
+        }
     } else @panic("Unknown command");
 }
 
