@@ -38,42 +38,17 @@ pub fn main() !void {
         defer decoded.deinit();
         try stdout.print("{f}\n", .{std.json.fmt(decoded.value, .{})});
     } else if (std.mem.eql(u8, command, "info")) {
-        const metainfo_file = args[2];
-        var file_buf: [4096]u8 = undefined;
-        const f = try std.fs.cwd().openFile(metainfo_file, .{});
-        defer f.close();
-        var reader = f.reader(&file_buf);
+        const metainfo = try readTorrent(allocator, args[2]);
+        defer metainfo.deinit(allocator);
 
-        const decoded = Bencode.decode(allocator, &reader.interface, .{}) catch @panic("Invalid encoded value");
-        defer decoded.deinit();
-
-        const metainfo = decoded.value.dict;
-        const info = metainfo.get("info").?.dict;
-        try stdout.print("Tracker URL: {s}\n", .{metainfo.get("announce").?.str});
-        try stdout.print("Length: {d}\n", .{info.get("length").?.int});
-
-        const Hash = std.crypto.hash.Sha1;
-        const hash = blk: {
-            var writer = null_writer.hashed(Hash.init(.{}), &.{});
-            try writer.writer.print("{f}", .{Bencode{ .dict = info }});
-            break :blk writer.hasher.finalResult();
-        };
-        try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(hash, .lower)});
-
-        const piece_len = info.get("piece length").?.int;
-        try stdout.print("Piece Length: {d}\n", .{piece_len});
+        try stdout.print("Tracker URL: {s}\n", .{metainfo.announce});
+        try stdout.print("Length: {d}\n", .{metainfo.length});
+        try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(metainfo.hash, .lower)});
+        try stdout.print("Piece Length: {d}\n", .{metainfo.piece_length});
 
         try stdout.print("Piece Hashes:\n", .{});
-        var piece_hashes = std.mem.window(
-            u8,
-            info.get("pieces").?.str,
-            Hash.digest_length,
-            Hash.digest_length,
-        );
-        while (piece_hashes.next()) |piece_hash| {
-            try stdout.print("{s}\n", .{
-                std.fmt.bytesToHex(piece_hash[0..Hash.digest_length].*, .lower),
-            });
+        for (metainfo.piece_hashes) |piece_hash| {
+            try stdout.print("{s}\n", .{std.fmt.bytesToHex(piece_hash, .lower)});
         }
     } else @panic("Unknown command");
 }
@@ -284,3 +259,56 @@ const Bencode = union(enum) {
         }
     }
 };
+
+const Metainfo = struct {
+    announce: []const u8,
+    length: u64,
+    piece_length: u64,
+    piece_hashes: []const Digest,
+    hash: Digest,
+
+    const Hash = std.crypto.hash.Sha1;
+    pub const Digest = [Hash.digest_length]u8;
+
+    pub fn parse(allocator: Allocator, reader: *Reader) !Metainfo {
+        const decoded = try Bencode.decode(allocator, reader, .{});
+        defer decoded.deinit();
+
+        const metainfo = decoded.value.dict;
+        const info = metainfo.get("info").?.dict;
+
+        const announce = try allocator.dupe(u8, metainfo.get("announce").?.str);
+        errdefer allocator.free(announce);
+
+        const piece_hashes = try allocator.dupe(Digest, @ptrCast(info.get("pieces").?.str));
+        errdefer allocator.free(piece_hashes);
+
+        const hash = blk: {
+            var writer = null_writer.hashed(Hash.init(.{}), &.{});
+            try writer.writer.print("{f}", .{Bencode{ .dict = info }});
+            break :blk writer.hasher.finalResult();
+        };
+
+        return .{
+            .announce = announce,
+            .length = @intCast(info.get("length").?.int),
+            .piece_length = @intCast(info.get("piece length").?.int),
+            .piece_hashes = piece_hashes,
+            .hash = hash,
+        };
+    }
+
+    pub fn deinit(self: Metainfo, allocator: Allocator) void {
+        allocator.free(self.announce);
+        allocator.free(self.piece_hashes);
+    }
+};
+
+fn readTorrent(allocator: Allocator, path: []const u8) !Metainfo {
+    var file_buf: [4096]u8 = undefined;
+    const f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+
+    var reader = f.reader(&file_buf);
+    return .parse(allocator, &reader.interface);
+}
