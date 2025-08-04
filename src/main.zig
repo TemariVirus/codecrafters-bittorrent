@@ -55,41 +55,13 @@ pub fn main() !void {
         const metainfo = try readTorrent(allocator, args[2]);
         defer metainfo.deinit(allocator);
 
-        const my_id = blk: {
-            var buf: [20]u8 = undefined;
-            std.crypto.random.bytes(&buf);
-            break :blk buf;
-        };
+        const my_id = randomId();
+        var client: std.http.Client = .{ .allocator = allocator };
+        defer client.deinit();
 
-        const response = blk: {
-            var client: std.http.Client = .{ .allocator = allocator };
-            defer client.deinit();
-
-            const query = try std.fmt.allocPrint(
-                allocator,
-                "info_hash={s}&peer_id={s}&port={d}&uploaded={d}&downloaded={d}&left={d}&compact=1",
-                .{ metainfo.hash, my_id, 6881, 0, 0, metainfo.length },
-            );
-            defer allocator.free(query);
-
-            var tracker: std.Uri = try .parse(metainfo.announce);
-            tracker.query = .{ .raw = query };
-
-            var server_header_buffer: [16 * 1024]u8 = undefined;
-            var req = try client.open(.GET, tracker, .{ .server_header_buffer = &server_header_buffer });
-            defer req.deinit();
-            try req.send();
-            try req.finish();
-            try req.wait();
-
-            // We don't care about the headers, so we can reuse the buffer
-            var reader = req.reader().adaptToNewApi(&server_header_buffer);
-            break :blk try Bencode.decode(allocator, &reader.new_interface, .{});
-        };
-        defer response.deinit();
-
-        var peers = std.mem.window(u8, response.value.dict.get("peers").?.str, 6, 6);
-        while (peers.next()) |peer_bytes| {
+        const peers = try getPeers(&client, metainfo, my_id);
+        defer allocator.free(peers);
+        for (peers) |peer_bytes| {
             try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
                 peer_bytes[0],
                 peer_bytes[1],
@@ -152,4 +124,43 @@ fn readTorrent(allocator: Allocator, path: []const u8) !Metainfo {
 
     var reader = f.reader(&file_buf);
     return .parse(allocator, &reader.interface);
+}
+
+fn randomId() [20]u8 {
+    var buf: [20]u8 = undefined;
+    std.crypto.random.bytes(&buf);
+    return buf;
+}
+
+fn getPeers(client: *std.http.Client, metainfo: Metainfo, peer_id: [20]u8) ![][6]u8 {
+    const allocator = client.allocator;
+
+    const response = blk: {
+        const query = try std.fmt.allocPrint(
+            allocator,
+            "info_hash={s}&peer_id={s}&port={d}&uploaded={d}&downloaded={d}&left={d}&compact=1",
+            .{ metainfo.hash, peer_id, 6881, 0, 0, metainfo.length },
+        );
+        defer allocator.free(query);
+
+        var tracker: std.Uri = try .parse(metainfo.announce);
+        tracker.query = .{ .raw = query };
+
+        var server_header_buffer: [16 * 1024]u8 = undefined;
+        var req = try client.open(.GET, tracker, .{
+            .keep_alive = false,
+            .server_header_buffer = &server_header_buffer,
+        });
+        defer req.deinit();
+        try req.send();
+        try req.finish();
+        try req.wait();
+
+        // We don't care about the headers, so we can reuse the buffer
+        var reader = req.reader().adaptToNewApi(&server_header_buffer);
+        break :blk try Bencode.decode(allocator, &reader.new_interface, .{});
+    };
+    defer response.deinit();
+
+    return allocator.dupe([6]u8, @ptrCast(response.value.dict.get("peers").?.str));
 }
