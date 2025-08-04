@@ -55,15 +55,20 @@ pub fn main() !void {
         const metainfo = try readTorrent(allocator, args[2]);
         defer metainfo.deinit(allocator);
 
+        const my_id = blk: {
+            var buf: [20]u8 = undefined;
+            std.crypto.random.bytes(&buf);
+            break :blk buf;
+        };
+
         const response = blk: {
             var client: std.http.Client = .{ .allocator = allocator };
             defer client.deinit();
 
-            const peer_id = "hjgv3678TV3vfHGQpoch"; // Keyboard mash
             const query = try std.fmt.allocPrint(
                 allocator,
                 "info_hash={s}&peer_id={s}&port={d}&uploaded={d}&downloaded={d}&left={d}&compact=1",
-                .{ metainfo.hash, peer_id, 6881, 0, 0, metainfo.length },
+                .{ metainfo.hash, my_id, 6881, 0, 0, metainfo.length },
             );
             defer allocator.free(query);
 
